@@ -8,57 +8,14 @@ defaults = {
     'lag_dt': 0.01
 }
 
+default_params = DefaultModel.Parameters()
 class Task(luigi.Task):
-    default_params = DefaultModel.Parameters()
     Model = luigi.Parameter(default=DefaultModel)
     params = luigi.Parameter(default=default_params)
     T = luigi.FloatParameter(default=2*default_params.Δ)
     model_dt = luigi.FloatParameter(default=DefaultModel.defaults['dt'])
     datadir = luigi.Parameter(default=defaults['datadir'])
     lag_dt = luigi.FloatParameter(default=defaults['lag_dt'])
-
-class InMemoryTarget(luigi.Target):
-    """
-    Target that is stored only in program memory. Since storage is not
-    permanent, this should only be used either for cheap operations (e.g.
-    at the final analysis stage) or for intermediate steps which don't need
-    to be saved to disk.
-    """
-    memory = {}  # Class attribute, shared across instances
-    def __init__(self, varname):
-        """
-        `varname`: Variable name or key.
-        """
-        self.varname = varname
-    def exists(self):
-        return self.varname in self.memory
-    def set(self, value):
-        import pdb; pdb.set_trace()
-        self.memory[self.varname] = value
-    def get(self):
-        return self.memory[self.varname]
-
-class Calc(luigi.Task):
-    def run(self):
-        self.output().set(self.calc())
-    def output(self):
-        return InMemoryTarget(hash(self))
-
-def calc(task, generator=False):
-    if not isinstance(task, Iterable):
-        print("\n\n")
-        print(InMemoryTarget.memory)
-        luigi.build([task])
-        print(InMemoryTarget.memory)
-        print("\n\n")
-        return task.output().get()
-    else:
-        luigi.build(task)
-        gen = (t.output.get() for t in task)
-        if generator:
-            return gen
-        else:
-            return tuple(gen)
 
 class Trace(Task):
     seed = luigi.IntParameter(0)
@@ -77,13 +34,32 @@ class Trace(Task):
         x = anlz.decimate(model.x, target_dt=self.lag_dt)
         with self.output().open('w') as f:
             print("\n\n" + f.name + "\n\n")
-            ml.iotools.save(f, x)
+            ml.iotools.save(f, x, format='npr')
         return x
 
     def output(self):
         #import pdb; pdb.set_trace()
         cachename = get_cache_name(self.Model, self.datadir, self.T, self.seed, self.params)
         return luigi.local_target.LocalTarget(cachename, format=luigi.format.Nop)
+
+    def load(self):
+        return ml.iotools.load(self.output(), format='npr')
+
+def tracetasks(t, seeds,
+               Model=DefaultModel,
+               params=DefaultModel.Parameters(),
+               model_dt=DefaultModel.defaults['dt'],
+               datadir=defaults['datadir'],
+               lag_dt=defaults['lag_dt']):
+    for seed in seeds:
+        yield Trace(Model=Model, params=params, seed=seed,
+                           T=t, model_dt=model_dt, datadir=datadir,
+                           lag_dt=lag_dt)
+
+def traces(*args, **kwargs):
+    luigi.build(tracetasks(*args, **kwargs))
+    for task in tracetasks(*args, **kwargs):
+        yield task.load()
 
 def get_state(trace, t, statelen):
     if isinstance(trace, (str, io.IOBase, luigi.LocalTarget)):
@@ -92,48 +68,71 @@ def get_state(trace, t, statelen):
     statelen = trace.index_interval(statelen)
     return trace[tidx-statelen:tidx]
 
-class M(Task, Calc):
-    seeds = luigi.ListParameter(defaults['seeds'])
-    t = luigi.FloatParameter()
+@lru_cache()
+def μ(t, params, N, statelen, **kwargs):
+    seeds = list(range(N))
+    return sum(get_state(trace, t, statelen)
+               for trace in traces(t, params=params, seeds=seeds, **kwargs)) / len(seeds)
+@lru_cache()
+def Σ(t, params, N, statelen, **kwargs):
+    seeds = list(range(N))
+    states = (get_state(trace, t, statelen)
+              for trace in traces(t, params=params, seeds=seeds, **kwargs))
+    _μ = μ(t, params, N, statelen, **kwargs)
+    return sum(np.multiply((state-_μ).T, state-_μ)
+               for state in states) / len(seeds)
 
-    def requires(self):
-        return (Trace(Model=self.Model, params=self.params, seed=seed,
-                      T=self.t, model_dt=self.model_dt, datadir=self.datadir,
-                      lag_dt=self.lag_dt)
-                for seed in self.seeds)
+class Realizations:
 
-    def calc(self):
-        return sum(get_state(trace, self.t, self.params.Δ)
-                   for trace in self.input()) / len(self.seeds)
+    def __init__(self, Model, params, seeds, statelen, t,
+                 model_dt=DefaultModel.defaults['dt'],
+                 datadir=defaults['datadir'],
+                 lag_dt=defaults['lag_dt']):
+        """
 
-class Cov(Task, Calc):
-    seeds = luigi.ListParameter(defaults['seeds'])
-    t = luigi.FloatParameter()
+        Parameters
+        ----------
+        Model: Class
+            One of the models in models.py. Note that we want the class, not
+            an instance.
+        params: Parameter object
+            Instance of Model.Parameters.
+        seeds: list of ints
+            The seeds identifying the different realizations.
+            # FIXME: Actually only the length of seeds is used
+        statelen: float
+            The length of a state of the dynamical system, i.e. it's longest
+            delay.
+        t: float
+            The time at which to take the state (i.e. how long to simulate for)
+        """
+        self.Model = Model
+        self.params = params
+        self.seeds = seeds
+        self.statelen = float(statelen)  # Make sure it's not an int
+        self.t = float(t)  # Make sure it's not an int
+        self.model_dt = model_dt
+        self.datadir = datadir
+        self.lag_dt = lag_dt
 
-    def requires(self):
-        # returns (traces, μ)
-        return  ( (Trace(Model=self.Model, params=self.params, seed=seed,
-                               T=self.t, model_dt=self.model_dt,
-                               datadir=self.datadir,
-                               lag_dt=self.lag_dt)
-                         for seed in self.seeds),
-                 #M(**dict(self.get_params())) )
-                 M(Model=self.Model, params=self.params, seeds=self.seeds,
-                    t=self.t, model_dt=self.model_dt,
-                    datadir=self.datadir,
-                    lag_dt=self.lag_dt) )
+    @property
+    def kwargs(self):
+        return {'Model': self.Model,
+                'model_dt': self.model_dt,
+                'datadir': self.datadir,
+                'lag_dt': self.lag_dt}
 
-    def calc(self):
-        traces, μ = self.input()
-        states = (get_state(trace, self.t, self.params.Δ) for trace in traces)
-        μ = μ.get()
-        return sum(np.multiply((state-μ).T, state-μ)
-                   for state in states) / len(self.seeds)
+    @property
+    def traces(self):
+        return traces(self.t, seeds=self.seeds, **self.kwargs)
 
-def μ(t, *args, **kwargs):
-    return calc(M(t=t, *args, **kwargs))
-def Σ(t, *args, **kwargs):
-    return calc(Cov(t=t, *args, **kwargs))
+    @property
+    def μ(self):
+        return μ(self.t, self.params, len(self.seeds), self.statelen, **self.kwargs)
+
+    @property
+    def Σ(self):
+        return Σ(self.t, self.params, len(self.seeds), self.statelen, **self.kwargs)
 
 #====================================
 # Luigi cache management
