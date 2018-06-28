@@ -1,17 +1,13 @@
 from init import *
 
-class TanhModel(sinn.models.Model):
-    Parameter_info = OrderedDict( (('α', ('floatX', 1.)),
+class Model(sinn.models.Model):
+    Parameter_info = OrderedDict( (('α', ('floatX', -1.)),
                                    ('β', ('floatX', 1.)),
                                    ('Δ', ('floatX', 1.)),
                                    ('q', ('floatX', 1.))
                                   ) )
     Parameters = sinn.define_parameters(Parameter_info)
     State = namedtuple('State', ['x'])
-
-    # Can be used e.g. when construction history x
-    # If necessary, instances can change defaults
-    defaults = {'dt': 0.001}
 
     def __init__(self, params, xname='x', T=10, dt=0.001, random_stream=None):
         if isinstance(params, dict):
@@ -27,9 +23,12 @@ class TanhModel(sinn.models.Model):
 
         self.statehists = [ getattr(self, varname) for varname in self.State._fields ]
 
+    # Using a static method allows us to call F without a class instance, e.g.
+    # `TanhModel.F(α,β)` to draw the force function.
     @staticmethod
     def F(x, α, β):
-        return α*(2*β) * shim.tanh(x/(2*β))
+        # Must be implemented in subclasses
+        raise NotImplementedError
 
     def x_fn(self, t):
         Δi = self.x.index_interval(self.params.Δ)
@@ -52,7 +51,12 @@ class TanhModel(sinn.models.Model):
         return [xt], {}
         #return [], {}
 
-class LinearModel(TanhModel):
+class TanhModel(Model):
+    @staticmethod
+    def F(x, α, β):
+        return α*(2*β) * shim.tanh(x/(2*β))
+
+class LinearModel(Model):
     @staticmethod
     def F(x, α, β):
         return α * x
