@@ -22,10 +22,17 @@ else:
 if ipython:
     # In an interactive session, long output is annoying and can really slow
     # down a notebook
-    loglevel = "WARNING"
+    importelems = {
+        'loglevel': "WARNING",
+        'tqdmimport': "from tqdm import tqdm_notebook as tqdm"
+        #'tqdmimport': "from tqdm import tqdm"
+        }
 else:
     # Default level is 'DEBUG'; 'INFO' is a little less verbose
-    loglevel = "INFO"
+    importelems = {
+        'loglevel': "INFO",
+        'tqdmimport': "from tqdm import tqdm"
+        }
 
 init_code = """
 import os
@@ -46,7 +53,7 @@ import mlluigi
 mlluigi.set_logging_level('{loglevel}')
 
 import theano
-from tqdm import tqdm_notebook as tqdm
+{tqdmimport}
 from parameters import ParameterSet
 
 import theano_shim as shim
@@ -66,7 +73,7 @@ plt.rcParams['figure.facecolor'] = (1,1,1,1)
 # Use pgf when exporting pdf
 from matplotlib.backends.backend_pgf import FigureCanvasPgf
 mpl.backend_bases.register_backend('pdf', FigureCanvasPgf)
-""".format(loglevel=loglevel)
+""".format(**importelems)
 
 exec(init_code)
 if ipython:
