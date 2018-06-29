@@ -42,7 +42,8 @@ import logging
 from multiprocessing import Pool
 from zipfile import BadZipFile  # For detecting corrupt files
 import numpy as np
-from functools import lru_cache, partial
+from functools import partial
+from mp_lru_cache import lru_cache  # Local version of lru_cache, specialized for multiprocessing
 from scipy.special import lambertw
 import matplotlib as mpl
 import matplotlib.pyplot as plt

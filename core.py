@@ -1,14 +1,16 @@
 from init import *
 import io
 import inspect
-from enum import Enum
+#from enum import Enum
 from models import TanhModel as DefaultModel
 
-class defaults(Enum):
-    seeds = list(range(10))
-    datadir = 'data'
-    lag_dt = 0.01
+Defaults = namedtuple('Defaults', ['seeds', 'datadir', 'lag_dt', 'cores'])
+defaults = Defaults(
+    seeds = list(range(10)),
+    datadir = 'data',
+    lag_dt = 0.01,
     cores = 3
+    )
 
 def getdefault(parameter):
     return inspect.signature(DefaultModel).parameters[parameter].default
@@ -90,7 +92,7 @@ def load_trace(seed, T,
                datadir=defaults.datadir,
                lag_dt=defaults.lag_dt):
     # TODO: Deprecate
-    # Don't use nested function (clojure) with multiprocessing
+    # Don't use nested function (closure) with multiprocessing
     return Trace(Model=Model, params=params, seed=seed,
                  T=T, model_dt=model_dt, datadir=datadir, lag_dt=lag_dt).load()
 def traces(t, seeds, cores=1, **kwargs):
@@ -117,6 +119,30 @@ def traces(t, seeds, cores=1, **kwargs):
             for trace in tracemap:
                 yield trace
 
+class TraceIterator:
+    """Provides whatever slicing capabilities `seeds` provides."""
+    def __init__(self, t, seeds, cores=1, **kwargs):
+        self.kwargs = {'t': t, 'cores': cores}
+        self.kwargs.update(kwargs)
+        self.seeds = seeds
+    def __iter__(self):
+        return traces(seeds=self.seeds, **self.kwargs)
+    def __getitem__(self, key):
+        return TraceIterator(seeds=self.seeds[key], **self.kwargs)
+class StateIterator:
+    """Provides whatever slicing capabilities `seeds` provides."""
+    def __init__(self, t, statelen, seeds, cores=1, **kwargs):
+        self.kwargs = {'t': t, 'cores': cores}
+        self.kwargs.update(kwargs)
+        self.seeds = seeds
+        self.statelen = statelen
+    def __iter__(self):
+        for trace in traces(seeds=self.seeds, **self.kwargs):
+            yield get_state(trace, t=self.kwargs['t'], statelen=self.statelen)
+    def __getitem__(self, key):
+        return StateIterator(seeds=self.seeds[key], **self.kwargs)
+
+
 def get_value(trace, t):
     if isinstance(trace, Trace):
         trace = trace.load()
@@ -125,7 +151,9 @@ def get_value(trace, t):
     tidx = trace.get_tidx(t, allow_rounding=True)
     return trace[tidx]
 def get_state(trace, t, statelen):
-    if isinstance(trace, (str, io.IOBase, luigi.LocalTarget)):
+    if isinstance(trace, Trace):
+        trace = trace.load()
+    elif isinstance(trace, (str, io.IOBase, luigi.LocalTarget)):
         trace = ml.iotools.load(trace, format='npr')
     tidx = trace.get_tidx(t, allow_rounding=True)
     statelen = trace.index_interval(statelen)
@@ -135,8 +163,8 @@ def _iter_memoized(memoized_fn, t, params, N, cores, **kwargs):
     if not isinstance(t, Iterable):
         return memoized_fn(t, params, N, **kwargs)
     else:
-        _μ = partial(memoized_fn, params=params, N=N, cores=1, **kwargs)
         if cores == 1:
+            _μ = partial(memoized_fn, params=params, N=N, cores=1, **kwargs)
             iterable = map(_μ, t)
             if isinstance(t, np.ndarray):
                 return np.fromiter(iterable, np.float, count=len(t))
@@ -144,18 +172,34 @@ def _iter_memoized(memoized_fn, t, params, N, cores, **kwargs):
                 return list(iterable)
         else:
             with Pool(cores) as pool:
-                imap = pool.imap(_μ, t)
-                iterable = tqdm(imap, total=len(t))
+                # _μ = partial(memoized_fn, params=params, N=N, cores=1,
+                #              pool=pool, **kwargs)
+                # async_res = [_μ(s) for s in t]
+                async_res = [memoized_fn(t=s, params=params, N=N, cores=1,
+                                         pool=pool, **kwargs)
+                             for s in t]
+                res = [r.get() for r in tqdm(async_res)]
                 if isinstance(t, np.ndarray):
-                    return np.fromiter(iterable, np.float, count=len(t))
+                    return np.array(res)
                 else:
-                    return list(iterable)
+                    return res
 
-@lru_cache()
-def _memoized_μ(t, params, N, **kwargs):
+# Using lru_cache along with multiprocessing brings about special challenges
+# Part if this is solved by specializing lru_cache to detect the 'pool'
+# argument and dispatch jobs to it.
+# Thus this approach requires that the function dispatched to the mp pool be
+# picklable; however, because @lru_cache hides the function it decorates, it
+# can't be sent to pool.
+# So the actual calculations (e.g. μ, Σ) need to be in a function which is not
+# overwritten, which we provide as _μ and _Σ.
+
+def _μ(t, params, N, **kwargs):
     seeds = list(range(N))
     return sum(get_value(trace, t)
                for trace in traces(t, params=params, seeds=seeds, **kwargs)) / len(seeds)
+@lru_cache(inner=_μ)
+def _memoized_μ(t, params, N, **kwargs):
+    pass
 def μ(t, params, N, cores=1, **kwargs):
     return _iter_memoized(_memoized_μ, t, params, N, cores=cores, **kwargs)
 
@@ -164,13 +208,15 @@ def stateμ(t, params, N, statelen, cores=1, **kwargs):
     seeds = list(range(N))
     return sum(get_state(trace, t, statelen)
                for trace in traces(t, params=params, seeds=seeds, **kwargs)) / len(seeds)
-@lru_cache()
-def _memoized_Σ(t, params, N, **kwargs):
+def _Σ(t, params, N, **kwargs):
     seeds = list(range(N))
-    states = (get_value(trace, t)
-              for trace in traces(t, params=params, seeds=seeds, **kwargs))
-    _μ = μ(t, params, N, **kwargs)
-    return sum(state**2 for state in states) / len(seeds) - _μ**2
+    xgen = (get_value(trace, t)
+            for trace in traces(t, params=params, seeds=seeds, **kwargs))
+    mu = μ(t, params, N, **kwargs)
+    return sum(x**2 for x in xgen) / len(seeds) - mu**2
+@lru_cache(inner=_Σ)
+def _memoized_Σ(t, params, N, **kwargs):
+    pass
 def Σ(t, params, N, cores=1, **kwargs):
     return _iter_memoized(_memoized_Σ, t, params, N, cores=cores, **kwargs)
 
@@ -183,6 +229,10 @@ def stateΣ(t, params, N, statelen, cores=1, **kwargs):
     return sum(np.multiply((state-_μ).T, state-_μ)
                for state in states) / len(seeds)
 
+@lru_cache()
+def eig(t, params, N, statelen, cores=1, **kwargs):
+    return np.linalg.eig(stateΣ(t, params, N, statelen, cores=1, **kwargs))
+
 class Realizations:
     """
     This class is used to representa an ensemble of realizations.
@@ -194,7 +244,7 @@ class Realizations:
     Subsequent calls to the same realizations require only reading from disk,
     which is much faster. The Luigi package is used to manage this disk cache.
     The Realizations class is careful never to actually load all realizations in
-    memory at once, so statistics over large numbers of realizations (10,000 or more)
+    memory at once, so statistics over large numbers of realizations (1,000 or more)
     are possible. The drawback with this approach is that the same realization
     may be loaded from disk multiple times. To minimize the I/O bottleneck,
     we use Python's `multiprocessing` module to load from the disk cache.
@@ -237,7 +287,7 @@ class Realizations:
         self.statelen = float(statelen)  # Make sure it's not an int
         self.T = float(T)  # Make sure it's not an int
         self.cores = cores
-        self.model_dt = model_dt
+        self.model_dt = model_dt  # TODO: Use the dt from a reference instead ?
         self.datadir = datadir
         self.lag_dt = lag_dt
 
@@ -259,30 +309,98 @@ class Realizations:
         """
         luigi.build(tracetasks(self.T, seeds=self.seeds, cores=self.cores, **self.kwargs))
 
-    def traces(self, t=None):
+    def traces(self, t=None, seeds=None):
         if t is None: t=self.T
-        return traces(t, seeds=self.seeds, cores=self.cores, **self.kwargs)
+        if seeds is None: seeds=self.seeds
+        return TraceIterator(t, seeds=seeds, cores=self.cores, **self.kwargs)
+    def states(self, t=None, seeds=None):
+        if t is None: t=self.T
+        if seeds is None: seeds=self.seeds
+        return StateIterator(t, statelen=self.statelen, seeds=seeds,
+                             cores=self.cores, **self.kwargs)
 
-    def μ(self, t=None):
+    def μ(self, t=None, seeds=None):
         """Pointwise mean"""
         if t is None: t=self.T
-        return μ(t, N=len(self.seeds), cores=self.cores, **self.kwargs)
-    def stateμ(self, t=None):
+        if seeds is None: seeds=self.seeds
+        return μ(t, N=len(seeds), cores=self.cores, **self.kwargs)
+    def stateμ(self, t=None, seeds=None):
         """State mean"""
         if t is None: t=self.T
-        return stateμ(t, N=len(self.seeds), statelen=self.statelen, cores=self.cores, **self.kwargs)
-    def Σ(self, t=None):
+        if seeds is None: seeds=self.seeds
+        return stateμ(t, N=len(seeds), statelen=self.statelen, cores=self.cores, **self.kwargs)
+    def Σ(self, t=None, seeds=None):
         """Pointwise variance"""
         if t is None: t=self.T
-        return Σ(t, N=len(self.seeds), cores=self.cores, **self.kwargs)
-    def stateΣ(self, t=None):
+        if seeds is None: seeds=self.seeds
+        return Σ(t, N=len(seeds), cores=self.cores, **self.kwargs)
+    def stateΣ(self, t=None, seeds=None):
         """State variance, i.e. autocovariance."""
         if t is None: t=self.T
-        return stateΣ(t, N=len(self.seeds), statelen=self.statelen, cores=self.cores, **self.kwargs)
-    def σ(self, t=None):
+        if seeds is None: seeds=self.seeds
+        return stateΣ(t, N=len(seeds), statelen=self.statelen, cores=self.cores, **self.kwargs)
+    def σ(self, t=None, seeds=None):
         """Standard deviation"""
         if t is None: t=self.T
+        if seeds is None: seeds=self.seeds
         return np.sqrt(self.Σ(t))
+    def crossΣ(self, N, t=None):
+        """
+        Return the cross-covariance across realizations.
+
+        Parameter
+        ---------
+        N: int
+            Number of realizations to use; they will be picked at random.
+            Note that a total of N² realizations will be used: N are chosen and
+            for each, we compute the cross-covariance with N other realizations.
+            We then take the sample average to get the cross-covariance of the
+            ensemble.
+        t: float (optional)
+            Time at which to take states. If unspecified, the latest time is
+            used (as set by `self.T`).
+
+        ..Note: At the moment this function is not parallelized.
+        """
+        if t is None: t=self.T
+        if N > np.sqrt(len(self.seeds)):
+            logger.warning("Number of realizations used to compute cross-covariance "
+                           "shouldn't exceed sqrt(# realizations). \n"
+                           "(# realizations: {}.)".format(len(self.seeds)))
+        seeds1 = np.random.choice(self.seeds, N, replace=False)
+            # We use replace=False because N may be relatively small (e.g. 20)
+            # Accidentaly reusing the same sample then can strongly skey the result
+        seeds2pool = [seed for seed in self.seeds if seed not in seeds1]
+            # All seeds that aren't one of the base seeds
+        def get_seeds2():
+            return np.random.choice(seeds2pool, N, replace=False)
+        μ = self.stateμ()
+
+        # if self.cores == 1:
+        if True:
+            return sum(np.multiply((state1-μ).T, state2-μ)
+                       for state1 in tqdm(self.states(seeds=seeds1), total=N)
+                       for state2 in self.states(seeds=get_seeds2())
+                       ) / N / (N-1)
+        # else:
+        #     with Pool(self.cores) as pool:
+        #         imap = pool.imap_unordered()
+
+    def eig(self, t=None, seeds=None):
+        """Eigenvalue decomposition of autocovariance matrix."""
+        if t is None: t=self.T
+        if seeds is None: seeds=self.seeds
+        return eig(t, N=len(seeds), statelen=self.statelen, cores=self.cores, **self.kwargs)
+    def c(self, t=None, seeds=None):
+        """Component coefficients."""
+        if t is None: t=self.T
+        if seeds is None: seeds=self.seeds
+        return np.real_if_close(eig(t, seeds)[0])
+    def u(self, t=None, seeds=None):
+        """Component coefficients."""
+        if t is None: t=self.T
+        if seeds is None: seeds=self.seeds
+        return np.real_if_close(eig(t, seeds)[1])
 
 
 #====================================
