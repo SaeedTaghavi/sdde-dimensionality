@@ -194,7 +194,7 @@ def _iter_memoized(memoized_fn, t, params, N, cores, **kwargs):
 # overwritten, which we provide as _μ and _Σ.
 
 def _μ(t, params, N, **kwargs):
-    seeds = list(range(N))
+    seeds = N if isinstance(N, Iterable) else list(range(N))
     return sum(get_value(trace, t)
                for trace in traces(t, params=params, seeds=seeds, **kwargs)) / len(seeds)
 @lru_cache(inner=_μ)
@@ -205,11 +205,11 @@ def μ(t, params, N, cores=1, **kwargs):
 
 @lru_cache()
 def stateμ(t, params, N, statelen, cores=1, **kwargs):
-    seeds = list(range(N))
+    seeds = N if isinstance(N, Iterable) else list(range(N))
     return sum(get_state(trace, t, statelen)
                for trace in traces(t, params=params, seeds=seeds, **kwargs)) / len(seeds)
 def _Σ(t, params, N, **kwargs):
-    seeds = list(range(N))
+    seeds = N if isinstance(N, Iterable) else list(range(N))
     xgen = (get_value(trace, t)
             for trace in traces(t, params=params, seeds=seeds, **kwargs))
     mu = μ(t, params, N, **kwargs)
@@ -222,7 +222,7 @@ def Σ(t, params, N, cores=1, **kwargs):
 
 @lru_cache()
 def stateΣ(t, params, N, statelen, cores=1, **kwargs):
-    seeds = list(range(N))
+    seeds = N if isinstance(N, Iterable) else list(range(N))
     states = (get_state(trace, t, statelen)
               for trace in traces(t, params=params, seeds=seeds, **kwargs))
     _μ = μ(t, params, N, statelen, **kwargs)
@@ -230,7 +230,7 @@ def stateΣ(t, params, N, statelen, cores=1, **kwargs):
                for state in states) / len(seeds)
 
 @lru_cache()
-def eig(t, params, N, statelen, cores=1, **kwargs):
+def PCA(t, params, N, statelen, cores=1, **kwargs):
     return np.linalg.eig(stateΣ(t, params, N, statelen, cores=1, **kwargs))
 
 class Realizations:
@@ -283,13 +283,20 @@ class Realizations:
         """
         self.Model = Model
         self.params = params
-        self.seeds = seeds
+        self.seeds = tuple(seeds)  # Make list of seeds hashable
         self.statelen = float(statelen)  # Make sure it's not an int
         self.T = float(T)  # Make sure it's not an int
         self.cores = cores
         self.model_dt = model_dt  # TODO: Use the dt from a reference instead ?
         self.datadir = datadir
-        self.lag_dt = lag_dt
+        self.lag_dt = lag_dt   # FIXME: This isn't actually used (the global default is)
+
+        self.reftrace = next(iter(self.traces()[0:1]))
+        # Traces are saved already decimated, i.e. with lag_dt instead of model_dt
+
+    def __hash__(self):
+        return hash((self.Model, self.params, self.seeds, self.statelen,
+                     self.T, self.model_dt, self.lag_dt))
 
     @property
     def kwargs(self):
@@ -308,6 +315,12 @@ class Realizations:
         for μ(2)).
         """
         luigi.build(tracetasks(self.T, seeds=self.seeds, cores=self.cores, **self.kwargs))
+
+    @property
+    def state_axis(self):
+        nstops = self.reftrace.index_interval(self.statelen)
+        return anlz.Axis(label='τ',
+                         stops=np.arange(nstops)*self.lag_dt)
 
     def traces(self, t=None, seeds=None):
         if t is None: t=self.T
@@ -386,21 +399,19 @@ class Realizations:
         #     with Pool(self.cores) as pool:
         #         imap = pool.imap_unordered()
 
-    def eig(self, t=None, seeds=None):
+    def PCA(self, t=None, seeds=None):
         """Eigenvalue decomposition of autocovariance matrix."""
         if t is None: t=self.T
         if seeds is None: seeds=self.seeds
-        return eig(t, N=len(seeds), statelen=self.statelen, cores=self.cores, **self.kwargs)
-    def c(self, t=None, seeds=None):
-        """Component coefficients."""
-        if t is None: t=self.T
-        if seeds is None: seeds=self.seeds
-        return np.real_if_close(eig(t, seeds)[0])
-    def u(self, t=None, seeds=None):
-        """Component coefficients."""
-        if t is None: t=self.T
-        if seeds is None: seeds=self.seeds
-        return np.real_if_close(eig(t, seeds)[1])
+        pca = PCA(t, N=len(seeds), statelen=self.statelen,
+                  cores=self.cores, **self.kwargs)
+        return (np.real_if_close(pca[0]), np.real_if_close(pca[1]))
+    def PCA_w(self, t=None, seeds=None):
+        """PCA component coefficients."""
+        return self.PCA(t, seeds)[0]
+    def PCA_φ(self, t=None, seeds=None):
+        """PCA component vectors."""
+        return self.PCA(t, seeds)[1]
 
 
 #====================================
