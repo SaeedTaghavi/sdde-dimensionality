@@ -54,7 +54,12 @@ class Trace(Task):
         return luigi.local_target.LocalTarget(cachename, format=luigi.format.Nop)
 
     def load(self):
-        return ml.iotools.load(self.output(), format='npr')
+        trace = ml.iotools.load(self.output(), format='npr')
+        trace.x.unlock()  # HACK? Traces are locked by default when loaded
+                          # This prevents finishing the calculation (usu. this
+                          # is because of indexing issues, and just the last
+                          # time point is missing)
+        return trace
 
 def tracetasks(t, seeds,
                Model=DefaultModel,
