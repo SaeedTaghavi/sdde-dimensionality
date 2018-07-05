@@ -1,7 +1,7 @@
 The code in this repository was created in part as experiment for creating
 a computational framework combining different tools in the Python ecosystem,
 namely [`Luigi`](https://luigi.readthedocs.io/en/stable/index.html),
-`functools`'s `lru_cache` and `multiprocessing`.
+`functools`'s [`lru_cache`](https://docs.python.org/3/library/functools.html#functools.lru_cache) and [`multiprocessing`](https://docs.python.org/3/library/multiprocessing.html).
 
 I make no apologies for any hacks or clunky design.
 
@@ -16,19 +16,20 @@ large numbers of stochastic realizations.
 To facilitate the calculation of empirical statistics for stochastic equations,
 this package provides
 
-    - Simple definition of new models with a single line of code.
-    - On-disk caching of system realizations.
-    - Parallelized generation of realizations.
-    - Memory-efficient statistics over large numbers of realizations:
-      realizations are never in memory all at once, and so can be arbitrarily many.
-    - Cached computation of statistics to eliminate the cost of keeping
-      realizations after the first calculation.
-    - Parallelized disk access to offset the disk-access cost for the initial
-      calculations of statistics.
-
-In addition, models can optionally be computed using Theano (see
+- Simple definition of new models with a single line of code.
+- On-disk caching of system realizations.
+- Parallelized generation of realizations.
+- Memory-efficient statistics over large numbers of realizations:
+  realizations are never in memory all at once, and so can be arbitrarily many.
+- Cached computation of statistics to eliminate the cost of keeping
+  realizations after the first calculation.
+- Parallelized disk access to offset the disk-access cost for the initial
+  calculations of statistics.
+ 
+In addition, models can optionally be computed using
+[Theano](http://www.deeplearning.net/software/theano/) (see
 [below](combining-with-machine-learning-tools)), allowing for
-automatic differentiation and translation to see code.
+automatic differentiation and translation to C code.
 
 # Installation
 
@@ -37,17 +38,17 @@ to the local directory to which it was cloned, the usual command
 
     pip install -e .
 
-I assume that you will want to make changes to the code; otherwise the `-e`
-part of the command may be omitted.
+will install it along with the required packages. I assume that you will want to
+make changes to the code; otherwise the `-e` part of the command may be omitted.
 
-Although not necessary, we recommend installing this package within a virtual
-environment.
+Although not necessary, we recommend installing this package within a [virtual
+environment](https://docs.python.org/3/tutorial/venv.html).
 
 ## Currently missing dependencies
 
 At present this code requires two packages which are yet public because they
-are tied to a manuscript currently in preparation. You can obtain these by
-contacting me directly at `alexandre (dot) rene (at) caesar (dot) de`.
+are tied to a manuscript in preparation (these are indicated in `setup.py`.)
+You can obtain these by contacting me directly at `alexandre (dot) rene (at) caesar (dot) de`.
 
 ## Progress bars
 
@@ -66,14 +67,15 @@ to
 
 # Combining with machine learning tools
 
-By default, stochastic models are computed using NumPy. They can optionally be
-computed instead with [Theano](). This allows for a substantial acceleration of
-simulation time thanks to the automatic translation and compilation to C code.
+Although models are computed using NumPy by default, they can be
+computed with [Theano](http://www.deeplearning.net/software/theano/) instead. 
+This allows for a substantial acceleration of simulation time thanks to the automatic
+translation and compilation to C code.
 Enabling Theano can be done by adding the line
 
     shim.load_theano()
 
-The `Comparison Theano vs Numpy` notebook demonstrates that we can get 10-fold
+before instantiating the model. The [`Comparison Theano vs Numpy`](https://github.com/alcrene/sdde-dimensionality/blob/master/notebooks/Comparison%20Theano%20vs%20Numpy.ipynb) notebook demonstrates that we can get 10-fold
 speed improvements this way.
 
 Using Theano also makes available a rich library of machine learning tools for
@@ -86,8 +88,8 @@ A `notebooks` directory is included, which contain Jupyter notebooks. These
 provide example uses of this code base and illustrate some of its features.
 Currently there are two:
 
-    - Comparison Theano vs Numpy: Shows that enabling Theano can provide
-      substantial acceleration when integrating differential equations.
-    - Linearized tanh: Analysis of a nonlinear SDDE with delayed sigmoidal
-      feedback. Illustrates the use of the `Realizations` class, along with
-      in-memory caching of statistics.
+- [Comparison Theano vs Numpy](https://github.com/alcrene/sdde-dimensionality/blob/master/notebooks/Comparison%20Theano%20vs%20Numpy.ipynb): Shows that enabling Theano can provide
+  substantial acceleration when integrating differential equations.
+- [Linearized tanh](https://github.com/alcrene/sdde-dimensionality/blob/master/notebooks/Linearized%20tanh.ipynb): Analysis of a nonlinear SDDE with delayed sigmoidal
+  feedback. Illustrates the use of the `Realizations` class, along with
+  in-memory caching of statistics.
